@@ -26,6 +26,7 @@ pragma solidity ^0.8.18;
 import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 /**
  * @title DSCEngine
@@ -35,13 +36,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * - Exogeneous Collateral
  * - Dollar Pegged
  * -- Algorithmically Stable
- * 
+ *
  * It is similar to DAI if DAI had no governance, no fees, and was only backed by WETH & WBTC
- * 
+ *
  * Our DSC System should always be "overcollateralized". At no point, should the value of all
-collateral <= the value of all the DSC
+ * collateral <= the value of all the DSC
  * @notice This contract is the core of the DSC system. It handles all the logic for mining and reddeming DSC,
- as well as depositing & withddrawing collateral.
+ *  as well as depositing & withddrawing collateral.
  * @notice This contract is very loosely based on the MakerDAO DSS (DAI Stablecoin System)
  */
 
@@ -51,10 +52,21 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength();
     error DSCEngine__NotAllowedToken();
     error DSCEngine__TransferFailed();
+    error DSCEngine__BreaksHealthFactor(uint256 healthFactor);
+    error DSCEngine__MintFailed();
 
-    /* State Variables */    
+    /* State Variables */
+    uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
+    uint256 private constant PRECISION = 1e18;
+    uint256 private constant LIQUIDATION_THRESHOLD = 50; // 200% overcollateralized
+    uint256 private constant LIQUIDATIO_PRECISION = 100;
+    uint256 private constant MIN_HEALTH_FACTOR = 1;
+
     mapping(address token => address priceFeeds) private s_priceFeeds; // tokenToPriceFeed
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
+    mapping(address user => uint256 amountDscMinted) private s_DSCMinted;
+
+    address[] private s_collateralTokens;
 
     DecentralizedStableCoin private immutable i_dsc;
 
@@ -62,15 +74,15 @@ contract DSCEngine is ReentrancyGuard {
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
 
     /* Modifiers */
-    modifier moreThanZero(uint256 amount){
-        if(amount == 0){
+    modifier moreThanZero(uint256 amount) {
+        if (amount == 0) {
             revert DSCEngine__NeedsMoreThanZero();
         }
         _;
     }
 
-    modifier isAllowedToken(address token){
-        if(s_priceFeeds[token] == address(0)){
+    modifier isAllowedToken(address token) {
+        if (s_priceFeeds[token] == address(0)) {
             revert DSCEngine__NotAllowedToken();
         }
         _;
@@ -78,54 +90,121 @@ contract DSCEngine is ReentrancyGuard {
 
     /* Functions */
 
-    constructor(address[] memory tokenAddresses, address[] memory priceFeedAddresses, address dscAddress){
+    constructor(address[] memory tokenAddresses, address[] memory priceFeedAddresses, address dscAddress) {
         // USD Price Feeds
-        if(tokenAddresses.length != priceFeedAddresses.length){
+        if (tokenAddresses.length != priceFeedAddresses.length) {
             revert DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength();
         }
 
-        for(uint256 i = 0;i < tokenAddresses.length;i++){
+        for (uint256 i = 0; i < tokenAddresses.length; i++) {
             s_priceFeeds[tokenAddresses[i]] = priceFeedAddresses[i];
+            s_collateralTokens.push(tokenAddresses[i]);
         }
         i_dsc = DecentralizedStableCoin(dscAddress);
-
     }
 
-    /* External Functions */    
-    function depositCollateralAndMintDsc() external{}
-
+    /* External Functions */
+    function depositCollateralAndMintDsc() external {}
 
     /**
      * @notice Follows CEI
      * @param tokenCollateralAddress The address of the token to deposit as collateral
      * @param amountCollateral The amount of collateral to deposit
      */
-    function depositCollateral(address tokenCollateralAddress, uint256 amountCollateral) external moreThanZero(amountCollateral) isAllowedToken(tokenCollateralAddress) nonReentrant{
+    function depositCollateral(address tokenCollateralAddress, uint256 amountCollateral)
+        external
+        moreThanZero(amountCollateral)
+        isAllowedToken(tokenCollateralAddress)
+        nonReentrant
+    {
         s_collateralDeposited[msg.sender][tokenCollateralAddress] += amountCollateral;
         emit CollateralDeposited(msg.sender, tokenCollateralAddress, amountCollateral);
         bool success = IERC20(tokenCollateralAddress).transferFrom(msg.sender, address(this), amountCollateral);
 
-        if(!success){
+        if (!success) {
             revert DSCEngine__TransferFailed();
         }
-
     }
 
-    function redeemCollateralForDsc() external{}
+    function redeemCollateralForDsc() external {}
 
-    function redeemCollateral() external{}
+    function redeemCollateral() external {}
 
     /**
      * @notice Follows CEI
      * @param amountDscToMint The amount of Decentralized Stablecoin to mint
      * @notice they must have more collateral value than the minimum threshold
      */
+    function mintDsc(uint256 amountDscToMint) external moreThanZero(amountDscToMint) nonReentrant {
+        s_DSCMinted[msg.sender] += amountDscToMint;
+        // if they minted too much ($150 DSC, $100 ETH)
+        _revertIfHealthFactorIsBroken(msg.sender);
+        bool minted = i_dsc.mint(msg.sender, amountDscToMint);
+        if (!minted) {
+            revert DSCEngine__MintFailed();
+        }
+    }
 
-    function mintDsc(uint256 amountDscToMint) external moreThanZero(amountDscToMint) nonReentrant{}
+    function burnDsc() external {}
 
-    function burnDsc() external{}
+    function liquidate() external {}
 
-    function liquidate() external{}
+    function gethealthFactor() external view {}
 
-    function gethealthFactor() external view{}
+    /* Private Internal View Functions */
+
+    function _getAccountInformation(address user)
+        private
+        view
+        returns (uint256 totalDscMinted, uint256 collateralValueInUsd)
+    {
+        totalDscMinted = s_DSCMinted[user];
+        collateralValueInUsd = getAccountCollateralValue(user);
+    }
+
+    /**
+     * Returns how close to liquidation a user is
+     * If a user goes below 1, they can get liquidated
+     */
+    function _healthFactor(address user) private view returns (uint256) {
+        // total DSC Minted
+        // total collateral value
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
+        uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATIO_PRECISION;
+        // 1000 ETH * 50 = 50,000 / 100 = 500
+        // $150 ETH / 100 DSC = 1.5
+        // 150 * 50 = 7500 / 100 = 75 (75 / 100 < 1)
+        return (collateralAdjustedForThreshold * PRECISION) / totalDscMinted;
+    }
+
+    function _revertIfHealthFactorIsBroken(address user) private view {
+        // 1. Check health factor (do they have enough collateral)
+        // 2. Revert if they don't
+
+        uint256 userHealthFactor = _healthFactor(user);
+        if (userHealthFactor < MIN_HEALTH_FACTOR) {
+            revert DSCEngine__BreaksHealthFactor(userHealthFactor);
+        }
+    }
+
+    /* Public & External View Functions */
+    function getAccountCollateralValue(address user) public view returns (uint256 totalCollateralValueInUsd) {
+        // loop through each collateral token, get the amount they have deposited, and map it to
+        // the price, to get the USD value
+        for (uint256 i = 0; i < s_collateralTokens.length; i++) {
+            address token = s_collateralTokens[i];
+            uint256 amount = s_collateralDeposited[user][token];
+            totalCollateralValueInUsd += getUsdValue(token, amount);
+        }
+
+        return totalCollateralValueInUsd;
+    }
+
+    function getUsdValue(address token, uint256 amount) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(s_priceFeeds[token]);
+        (, int256 price,,,) = priceFeed.latestRoundData();
+        // e.g. 1 ETH = $1,500
+        // The returned value from CL will be 1500 * 1e8
+        return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION; // (1500 * 1e8 * (1e10)) * 1500 * 1e18
+    }
 }
