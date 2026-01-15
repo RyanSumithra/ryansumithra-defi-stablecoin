@@ -104,7 +104,17 @@ contract DSCEngine is ReentrancyGuard {
     }
 
     /* External Functions */
-    function depositCollateralAndMintDsc() external {}
+
+    /**
+     * @notice This function will deposit your collateral and mint DSC in one transaction
+     * @param tokenCollateral The address of the token to deposit as collateral
+     * @param amountCollateral The amount of collateral to deposit
+     * @param amountDscToMint The amount of Decentralized Stablecoin to mint
+     */
+    function depositCollateralAndMintDsc(address tokenCollateral, uint256 amountCollateral, uint256 amountDscToMint) external {
+        depositCollateral(tokenCollateral, amountCollateral);
+        mintDsc(amountDscToMint);
+    }
 
     /**
      * @notice Follows CEI
