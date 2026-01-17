@@ -346,4 +346,8 @@ contract DSCEngine is ReentrancyGuard {
         // ($10e18 * 1e18) / (20000e8 * 1e10) = 0.005 ETH
         return (usdAmountInWei * PRECISION) / (uint256(price) * ADDITIONAL_FEED_PRECISION);
     }
+
+    function getAccountInformation(address user) external view returns( uint256 totalDscMinted, uint256 collateralValueInUsd) {
+        (totalDscMinted, collateralValueInUsd) = _getAccountInformation(user);
+    }
 }

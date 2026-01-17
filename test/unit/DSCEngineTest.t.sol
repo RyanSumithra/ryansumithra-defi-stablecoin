@@ -15,6 +15,7 @@ contract DSCEngineTest is Test {
     DSCEngine dscEngine;
     HelperConfig config;
     address ethUsdPriceFeed;
+    address btcUsdPriceFeed;
     address weth;
 
     address public USER = makeAddr("user");
@@ -25,6 +26,9 @@ contract DSCEngineTest is Test {
         deployer = new DeployDSC();
         (dsc, dscEngine, config) = deployer.run();
         (ethUsdPriceFeed,, weth,,) = config.activeNetworkConfig();
+
+        // Mint some WETH to USER
+        ERC20Mock(weth).mint(USER, STARTING_ERC20_BALANCE);
     }
 
     /* Price Tests */
@@ -38,6 +42,14 @@ contract DSCEngineTest is Test {
         ERC20Mock(weth).mint(USER, STARTING_ERC20_BALANCE);
     }
 
+    function testGetTokenAmountFromUsd() public{
+        uint256 usdAmount = 100 ether;
+        // $2000/ETH, $100 
+        uint256 expectedWeth = 0.05 ether;
+        uint256 actualWeth = dscEngine.getTokenAmountFromUsd(weth, usdAmount);
+        assertEq(expectedWeth, actualWeth);
+    }
+
     /* Deposit Collateral Tests */
     function testRevertsIfCollateralZero() public {
         vm.startPrank(USER);
@@ -46,5 +58,44 @@ contract DSCEngineTest is Test {
         vm.expectRevert(DSCEngine.DSCEngine__NeedsMoreThanZero.selector);
         dscEngine.depositCollateral(weth, 0);
         vm.stopPrank();
+    }
+
+    function testRevertsWithUnapprovedCollateral() public{
+        ERC20Mock ranToken = new ERC20Mock("RAN", "RAN", USER, AMOUNT_COLLATERAL);
+        vm.startPrank(USER);
+        vm.expectRevert(DSCEngine.DSCEngine__NotAllowedToken.selector);
+        dscEngine.depositCollateral(address(ranToken), AMOUNT_COLLATERAL);
+        vm.stopPrank();
+    }
+
+    modifier depositCollateral(){
+        vm.startPrank(USER);
+        ERC20Mock(weth).approve(address(dscEngine), AMOUNT_COLLATERAL);
+        dscEngine.depositCollateral(weth, AMOUNT_COLLATERAL);
+        vm.stopPrank();
+        _;
+    }
+
+    function testCanDepositCollateralAndGetAccountInfo() public depositCollateral{
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = dscEngine.getAccountInformation(USER);
+
+        uint256 expectedTotalDscMinted = 0;
+        uint256 expectedDepositAmount = dscEngine.getTokenAmountFromUsd(weth, collateralValueInUsd);
+        assertEq(expectedTotalDscMinted, totalDscMinted);
+        assertEq(expectedDepositAmount, AMOUNT_COLLATERAL);
+
+    }
+
+    /* Constructor Tests */
+    address[] public tokenAddresses;
+    address[] public priceFeedAddresses;
+
+    function testRevertsIfTokenLengthDoesntMatchPriceFeeds() public{
+        tokenAddresses.push(weth);
+        priceFeedAddresses.push(ethUsdPriceFeed);
+        priceFeedAddresses.push(ethUsdPriceFeed);
+
+        vm.expectRevert(DSCEngine.DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
     }
 }
